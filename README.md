@@ -186,7 +186,6 @@ MODEL_NAME     = 'tcn'      # cnn | gru | tcn
 | **MAE** | Mean Absolute Error in Watts — primary regression metric |
 | **F1** | Harmonic mean of Precision and Recall computed on ON/OFF status |
 | **Accuracy** | Overall ON/OFF classification accuracy |
-| **Energy Error %** | Absolute relative error on total energy consumption (Wh) |
 
 ---
 
