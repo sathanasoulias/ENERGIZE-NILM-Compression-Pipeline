@@ -1,0 +1,2 @@
+Model,Appliance,Dataset,MAE,F1,F1_Complex,Accuracy,Precision,Recall,GT_Energy_Wh,Pred_Energy_Wh,Energy_Error_Percent
+gru,ac_1,plegma,23.2942,0.9178,0.9346,0.9912,0.8929,0.9442,63468.64,45142.34,28.87
