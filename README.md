@@ -27,9 +27,9 @@ The compression pipeline supports the same PyTorch architectures as the training
 
 | Model | Architecture | Strategy | Input Window |
 |-------|-------------|----------|-------------|
-| **CNN** | 1-D Convolutional Network | Seq2Point | 299 samples |
-| **GRU** | Gated Recurrent Unit | Seq2Point | 199 samples |
-| **TCN** | Temporal Convolutional Network | Seq2Seq | 600 samples |
+| **Seq2Point CNN** | 1-D Convolutional Network | Seq2Point | 299 samples |
+| **Seq2Seq CNN** | 1D Convolutional Network | Seq2Seq | 299 samples |
+| **WaveNet TCN** | Temporal Convolutional Network | Seq2Seq | 600 samples |
 
 ---
 
@@ -160,22 +160,7 @@ Results are written to `outputs/<model>_<appliance>/metrics/`.
 All static hyperparameters are defined in [src_pytorch/config.py](src_pytorch/config.py).
 Only three values need to be set per experiment:
 
-```python
-DATASET_NAME   = 'plegma'
-APPLIANCE_NAME = 'boiler'   # boiler | ac_1 | washing_machine
-MODEL_NAME     = 'tcn'      # cnn | gru | tcn
-```
 
-**Key training parameters**
-
-| Parameter | TCN | CNN | GRU | Description |
-|-----------|-----|-----|-----|-------------|
-| Epochs | 100 | 50 | 100 | Maximum training epochs |
-| Early stopping patience | 20 | 10 | 20 | Epochs without val_loss improvement before stopping |
-| Optimizer | Adam | Adam | Adam | β₁=0.9, β₂=0.999, ε=1e-8 |
-| Loss | MSE | MSE | MSE | Mean squared error on normalised targets |
-
-**Learning rate:** `0.001` (Adam) — shared across all appliances and models.
 
 ---
 

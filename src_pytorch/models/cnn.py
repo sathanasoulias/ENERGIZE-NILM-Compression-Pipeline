@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 CNN-based Seq2Point model for NILM
 Based on: https://arxiv.org/pdf/1612.09106

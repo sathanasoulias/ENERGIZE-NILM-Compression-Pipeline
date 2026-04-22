@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 src_pytorch/quantizer.py
 
@@ -43,7 +44,7 @@ except ImportError as exc:
         "Install it with:  pip install tensorflow"
     ) from exc
 
-from .models import CNN_NILM, TCN_NILM, GRU_NILM
+from .models import CNN_NILM, TCN_NILM, CNN_NILM_Seq2Seq
 from .pruner import apply_torch_pruning
 from .evaluator import compute_metrics, compute_status
 
@@ -143,6 +144,56 @@ def _load_cnn(cfg: dict, ckpt_path, device: torch.device) -> nn.Module:
     model = CNN_NILM(input_window_length=cfg['window'])
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     return model.to(device).eval()
+
+
+# =============================================================================
+# 1c. CNN Seq2Seq Model Reconstruction
+# =============================================================================
+
+def _load_cnn_seq2seq(cfg: dict, ckpt_path, device: torch.device) -> nn.Module:
+    """Load a baseline (un-pruned) CNN_NILM_Seq2Seq from *ckpt_path*."""
+    model = CNN_NILM_Seq2Seq(input_window_length=cfg['window'])
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    return model.to(device).eval()
+
+
+def rebuild_pruned_cnn_seq2seq(
+    cfg: dict,
+    baseline_ckpt,
+    pruning_ratio: float,
+    finetuned_ckpt_path,
+    device: torch.device,
+) -> nn.Module:
+    """Reproduce the pruned + fine-tuned CNN Seq2Seq architecture deterministically.
+
+    Follows the same three-step procedure as :func:`rebuild_pruned_cnn`:
+    rebuild baseline → re-apply pruning → load fine-tuned weights.
+
+    Parameters
+    ----------
+    cfg                 : dict — must contain 'window' and 'args_window_size'
+    baseline_ckpt       : str or Path
+    pruning_ratio       : float — target *parameter* reduction fraction
+    finetuned_ckpt_path : str or Path
+    device              : torch.device
+
+    Returns
+    -------
+    nn.Module — pruned CNN_NILM_Seq2Seq in eval mode with fine-tuned weights
+    """
+    finetuned_ckpt_path = Path(finetuned_ckpt_path)
+    if not finetuned_ckpt_path.exists():
+        raise FileNotFoundError(
+            f"Fine-tuned checkpoint not found:\n  {finetuned_ckpt_path}\n"
+            "Run 05_structured_pruning.ipynb first with matching settings."
+        )
+
+    model        = _load_cnn_seq2seq(cfg, baseline_ckpt, device)
+    pruning_args = SimpleNamespace(window_size=cfg['args_window_size'])
+    dummy        = torch.randn(1, cfg['window']).to(device)
+    model, _     = apply_torch_pruning(model, pruning_args, dummy, pruning_ratio)
+    model.load_state_dict(torch.load(finetuned_ckpt_path, map_location=device))
+    return model.eval()
 
 
 def rebuild_pruned_cnn(
@@ -455,7 +506,128 @@ def build_cnn_keras(
 
 
 # =============================================================================
-# 2c. GRU TF/Keras Model Building
+# 2c. CNN Seq2Seq TF/Keras Model Building
+# =============================================================================
+
+def read_pruned_cnn_seq2seq_channels(pt_model: nn.Module) -> tuple:
+    """Extract actual post-pruning channel counts from a CNN_NILM_Seq2Seq.
+
+    Layer indices in ``network`` are identical to CNN_NILM (Seq2Point).
+    The only difference is that ``network.16`` outputs ``seq_len`` units
+    instead of 1.
+
+    Parameters
+    ----------
+    pt_model : nn.Module — pruned CNN_NILM_Seq2Seq
+
+    Returns
+    -------
+    filters     : list[int] — [ch1, ch2, ch3, ch4, ch5] output channels per Conv1d
+    dense1_units: int       — output units of the first Dense layer
+    """
+    sd = pt_model.state_dict()
+    filters = [
+        sd['network.0.weight'].shape[0],
+        sd['network.2.weight'].shape[0],
+        sd['network.4.weight'].shape[0],
+        sd['network.6.weight'].shape[0],
+        sd['network.9.weight'].shape[0],
+    ]
+    dense1_units = sd['network.13.weight'].shape[0]
+    return filters, dense1_units
+
+
+def build_cnn_seq2seq_keras(
+    filters: list,
+    seq_len: int,
+    dense1_units: int = 1024,
+) -> 'keras.Model':
+    """Build a TF/Keras reimplementation of the pruned CNN_NILM_Seq2Seq.
+
+    Identical to :func:`build_cnn_keras` except the final Dense layer outputs
+    *seq_len* values (the full window) and a Reshape brings the output to
+    ``(batch, seq_len, 1)`` to match the PyTorch forward pass.
+
+    Parameters
+    ----------
+    filters      : list[int] — [ch1, ch2, ch3, ch4, ch5] pruned output channels
+    seq_len      : int       — input / output sequence length (default 299)
+    dense1_units : int       — output units of the first Dense layer
+
+    Returns
+    -------
+    keras.Model — Input shape: (batch, seq_len, 1)  Output shape: (batch, seq_len, 1)
+    """
+    from tensorflow.keras.layers import Dense, Flatten, Permute, Reshape
+
+    ch1, ch2, ch3, ch4, ch5 = filters
+
+    inp = keras.Input(shape=(seq_len, 1), name='input')
+
+    x = Conv1D(ch1, 10, padding='valid', use_bias=True, name='conv1')(inp)
+    x = ReLU(name='relu1')(x)
+    x = Conv1D(ch2, 8, padding='valid', use_bias=True, name='conv2')(x)
+    x = ReLU(name='relu2')(x)
+    x = Conv1D(ch3, 6, padding='valid', use_bias=True, name='conv3')(x)
+    x = ReLU(name='relu3')(x)
+    x = Conv1D(ch4, 5, padding='valid', use_bias=True, name='conv4')(x)
+    x = ReLU(name='relu4')(x)
+    x = Dropout(0.2, name='drop4')(x)
+    x = Conv1D(ch5, 5, padding='valid', use_bias=True, name='conv5')(x)
+    x = ReLU(name='relu5')(x)
+    x = Dropout(0.2, name='drop5')(x)
+    x = Permute((2, 1), name='permute_flatten')(x)
+    x = Flatten(name='flatten')(x)
+    x = Dense(dense1_units, use_bias=True, name='dense1')(x)
+    x = ReLU(name='relu_dense')(x)
+    x = Dropout(0.2, name='drop_dense')(x)
+    x = Dense(seq_len, use_bias=True, name='dense2')(x)
+    x = Reshape((seq_len, 1), name='reshape_output')(x)
+
+    return keras.Model(inputs=inp, outputs=x, name='CNN_NILM_Seq2Seq_TF')
+
+
+# =============================================================================
+# 3c. CNN Seq2Seq Weight Transfer
+# =============================================================================
+
+def transfer_cnn_seq2seq_weights(
+    tf_model: 'keras.Model',
+    pt_state_dict: dict,
+) -> None:
+    """Copy weights from a pruned CNN Seq2Seq PyTorch state dict into a TF/Keras model.
+
+    Identical mapping to :func:`transfer_cnn_weights` — the layer names and
+    indices in ``network`` are the same; only the output Dense shape differs.
+
+    Parameters
+    ----------
+    tf_model      : keras.Model — must have been built by :func:`build_cnn_seq2seq_keras`
+    pt_state_dict : dict        — ``pt_model.state_dict()``
+    """
+    def _set_conv(layer_name, pt_w_key, pt_b_key):
+        w = pt_state_dict[pt_w_key].cpu().permute(2, 1, 0).numpy()
+        b = pt_state_dict[pt_b_key].cpu().numpy()
+        tf_model.get_layer(layer_name).set_weights([w, b])
+
+    def _set_dense(layer_name, pt_w_key, pt_b_key):
+        w = pt_state_dict[pt_w_key].cpu().numpy().T
+        b = pt_state_dict[pt_b_key].cpu().numpy()
+        tf_model.get_layer(layer_name).set_weights([w, b])
+
+    _set_conv('conv1', 'network.0.weight', 'network.0.bias')
+    _set_conv('conv2', 'network.2.weight', 'network.2.bias')
+    _set_conv('conv3', 'network.4.weight', 'network.4.bias')
+    _set_conv('conv4', 'network.6.weight', 'network.6.bias')
+    _set_conv('conv5', 'network.9.weight', 'network.9.bias')
+    _set_dense('dense1', 'network.13.weight', 'network.13.bias')
+    _set_dense('dense2', 'network.16.weight', 'network.16.bias')
+
+    print('CNN Seq2Seq weights transferred successfully.')
+
+
+# =============================================================================
+# 2d. (formerly 2c) GRU TF/Keras Model Building
 # =============================================================================
 
 def read_pruned_gru_channels(pt_model: nn.Module) -> tuple:
@@ -935,7 +1107,7 @@ def evaluate_tflite(
     threshold: float,
     min_on: int = None,
     min_off: int = None,
-    max_length: int = None,
+    min_committed_duration: int = None,
 ) -> tuple:
     """Evaluate a TFLite INT8 model on the test split using the CPU interpreter.
 
@@ -959,9 +1131,9 @@ def evaluate_tflite(
     threshold   : float      — ON/OFF boundary in Watts
     min_on      : int        — minimum ON-duration for status computation
                                (enables ``f1_complex`` when provided)
-    min_off     : int        — minimum OFF-duration for status computation
-    max_length  : int        — optional stricter final length filter passed to
-                               :func:`~src_pytorch.evaluator.compute_status`
+    min_off                : int — minimum OFF-duration for status computation
+    min_committed_duration : int — optional stricter final length filter passed to
+                                   :func:`~src_pytorch.evaluator.compute_status`
 
     Returns
     -------
@@ -1013,13 +1185,13 @@ def evaluate_tflite(
     pred[pred < threshold] = 0
     pred[pred > cutoff]    = cutoff
 
-    metrics = compute_metrics(gt, pred, threshold, min_on=min_on, min_off=min_off, max_length=max_length)
+    metrics = compute_metrics(gt, pred, threshold, min_on=min_on, min_off=min_off, min_committed_duration=min_committed_duration)
 
     gt_status   = None
     pred_status = None
     if min_on is not None and min_off is not None:
-        gt_status   = compute_status(gt,   threshold, min_on, min_off, max_length)
-        pred_status = compute_status(pred, threshold, min_on, min_off, max_length)
+        gt_status   = compute_status(gt,   threshold, min_on, min_off, min_committed_duration)
+        pred_status = compute_status(pred, threshold, min_on, min_off, min_committed_duration)
 
     return metrics, gt, pred, gt_status, pred_status
 

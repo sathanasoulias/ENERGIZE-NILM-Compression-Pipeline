@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 PyTorch Data Loader for NILM experiments.
 """
@@ -26,7 +27,8 @@ class NILMDataset(Dataset):
         labels: np.ndarray,
         input_window_length: int,
         model_name: str,
-        dtype: torch.dtype = torch.float32
+        dtype: torch.dtype = torch.float32,
+        stride: int = None,
     ):
         """
         Initialize the NILM Dataset.
@@ -35,50 +37,54 @@ class NILMDataset(Dataset):
             data: Input aggregate power data (1D array)
             labels: Target appliance power data (1D array)
             input_window_length: Length of input sequence window
-            model_name: Name of model ('cnn', 'gru', 'tcn')
+            model_name: Name of model ('cnn', 'gru', 'tcn', 'cnn_seq2seq')
             dtype: PyTorch data type for tensors
+            stride: Override window stride for seq2seq models. Defaults to
+                    input_window_length (non-overlapping) when None.
         """
         self.input_window_length = input_window_length
         self.model_name = model_name.lower()
         self.dtype = dtype
 
-        if self.model_name in ['cnn', 'gru']:
+        if self.model_name == 'cnn':
             self._prepare_seq2point(data, labels)
-        elif self.model_name == 'tcn':
-            self._prepare_seq2seq(data, labels)
+        elif self.model_name in ['wavenet_tcn', 'cnn_seq2seq']:
+            effective_stride = stride if stride is not None else input_window_length
+            self._prepare_seq2seq(data, labels, stride=effective_stride)
         else:
             raise ValueError(f"Unsupported model: {model_name}")
 
     def _prepare_seq2point(self, data: np.ndarray, labels: np.ndarray):
-        """Prepare data for Seq2Point models (CNN, GRU)."""
+        """Prepare data for Seq2Point models (CNN)."""
         # Create sliding windows for inputs
         self.inputs = sliding_window_view(data, self.input_window_length)
 
-        # Determine target offset based on model
-        if self.model_name == 'cnn':
-            # Target is center point of window
-            offset = self.input_window_length // 2
-            self.targets = labels[offset:offset + len(self.inputs)]
-        else:  # gru
-            # Target is last point of window
-            offset = self.input_window_length - 1
-            self.targets = labels[offset:offset + len(self.inputs)]
+        # Target is the center point of the window
+        offset = self.input_window_length // 2
+        self.targets = labels[offset:offset + len(self.inputs)]
 
         # Ensure matching lengths
         min_len = min(len(self.inputs), len(self.targets))
         self.inputs = self.inputs[:min_len].astype(np.float32)
         self.targets = self.targets[:min_len].astype(np.float32)
 
-    def _prepare_seq2seq(self, data: np.ndarray, labels: np.ndarray):
-        """Prepare data for Seq2Seq models (TCN)."""
-        # Non-overlapping windows
+    def _prepare_seq2seq(self, data: np.ndarray, labels: np.ndarray, stride: int = None):
+        """Prepare data for Seq2Seq models (TCN, CNN Seq2Seq).
+
+        Args:
+            stride: Window step size. Use input_window_length for non-overlapping
+                    (TCN) or 1 for fully sliding windows (CNN Seq2Seq).
+        """
+        if stride is None:
+            stride = self.input_window_length
+
         self.inputs = sliding_window_view(
             data, self.input_window_length
-        )[::self.input_window_length, :]
+        )[::stride, :]
 
         self.targets = sliding_window_view(
             labels, self.input_window_length
-        )[::self.input_window_length, :]
+        )[::stride, :]
 
         # Ensure matching lengths
         min_len = min(len(self.inputs), len(self.targets))
@@ -97,8 +103,9 @@ class NILMDataset(Dataset):
         y = torch.tensor(self.targets[idx], dtype=self.dtype)
 
         # Ensure target shape
-        if self.model_name in ['cnn', 'gru'] and y.dim() == 0:
+        if self.model_name == 'cnn' and y.dim() == 0:
             y = y.unsqueeze(0)
+        # cnn_seq2seq targets already have shape (window_length, 1) from _prepare_seq2seq
 
         return x, y
 
@@ -157,14 +164,16 @@ class SimpleNILMDataLoader:
         data: np.ndarray,
         labels: np.ndarray,
         shuffle: bool = False,
-        drop_last: bool = False
+        drop_last: bool = False,
+        stride: int = None,
     ) -> DataLoader:
         """Create a DataLoader from numpy arrays."""
         dataset = NILMDataset(
             data=data,
             labels=labels,
             input_window_length=self.input_window_length,
-            model_name=self.model_name
+            model_name=self.model_name,
+            stride=stride,
         )
 
         return DataLoader(
@@ -178,26 +187,35 @@ class SimpleNILMDataLoader:
 
     @property
     def train(self) -> DataLoader:
-        """Returns the training DataLoader (shuffled)."""
+        """Returns the training DataLoader (shuffled).
+        cnn_seq2seq uses sliding windows (stride=1) for maximum training data.
+        """
+        stride = 1 if self.model_name == 'cnn_seq2seq' else None
         return self._create_dataloader(
             self.train_data, self.train_labels,
-            shuffle=True, drop_last=True
+            shuffle=True, drop_last=True, stride=stride
         )
 
     @property
     def val(self) -> DataLoader:
-        """Returns the validation DataLoader."""
+        """Returns the validation DataLoader.
+        cnn_seq2seq uses non-overlapping windows for honest validation metrics.
+        """
+        stride = self.input_window_length if self.model_name == 'cnn_seq2seq' else None
         return self._create_dataloader(
             self.val_data, self.val_labels,
-            shuffle=False, drop_last=False
+            shuffle=False, drop_last=False, stride=stride
         )
 
     @property
     def test(self) -> DataLoader:
-        """Returns the test DataLoader."""
+        """Returns the test DataLoader.
+        Always non-overlapping for consistent evaluation across all models.
+        """
+        stride = self.input_window_length if self.model_name == 'cnn_seq2seq' else None
         return self._create_dataloader(
             self.test_data, self.test_labels,
-            shuffle=False, drop_last=False
+            shuffle=False, drop_last=False, stride=stride
         )
 
 

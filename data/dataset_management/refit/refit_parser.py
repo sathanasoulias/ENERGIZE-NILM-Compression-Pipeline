@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 import pandas as pd
 from pathlib import Path
 import numpy as np

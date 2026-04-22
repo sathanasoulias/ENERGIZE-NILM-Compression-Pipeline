@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 ENERGIZE — Main Training and Evaluation Script
 ================================================

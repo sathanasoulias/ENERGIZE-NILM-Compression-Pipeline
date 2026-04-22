@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 src_pytorch/pipeline.py
 
@@ -26,19 +27,11 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from .models import CNN_NILM, GRU_NILM, TCN_NILM
+from .models import CNN_NILM, TCN_NILM, CNN_NILM_Seq2Seq
 from .data_loader import SimpleNILMDataLoader
 from .trainer import Trainer
 from .config import get_model_config, get_appliance_params, TRAINING, CALLBACKS
 from .utils import count_parameters
-from .pruner import (
-    apply_torch_pruning,
-    apply_unstructured_pruning,
-    remove_pruning_masks,
-    get_model_sparsity,
-    get_model_stats,
-    param_ratio_to_channel_ratio,
-)
 from .evaluator import (
     compute_status,
     evaluate_model,
@@ -54,7 +47,7 @@ def build_nilm_model(model_name: str, model_config: dict) -> nn.Module:
 
     Parameters
     ----------
-    model_name   : ``'cnn'``, ``'gru'``, or ``'tcn'``
+    model_name   : ``'cnn'``, ``'cnn_seq2seq'``, or ``'tcn'``
     model_config : dict returned by :func:`~src_pytorch.config.get_model_config`
 
     Returns
@@ -65,9 +58,9 @@ def build_nilm_model(model_name: str, model_config: dict) -> nn.Module:
 
     if model_name == 'cnn':
         return CNN_NILM(input_window_length=window)
-    if model_name == 'gru':
-        return GRU_NILM(input_window_length=window)
-    if model_name == 'tcn':
+    if model_name == 'cnn_seq2seq':
+        return CNN_NILM_Seq2Seq(input_window_length=window)
+    if model_name == 'wavenet_tcn':
         return TCN_NILM(
             input_window_length=window,
             depth=model_config.get('depth', 9),
@@ -75,7 +68,7 @@ def build_nilm_model(model_name: str, model_config: dict) -> nn.Module:
             dropout=model_config.get('dropout', 0.2),
             stacks=model_config.get('stacks', 1),
         )
-    raise ValueError(f"Unknown model: '{model_name}'. Choose from cnn, gru, tcn.")
+    raise ValueError(f"Unknown model: '{model_name}'. Choose from 'cnn', 'cnn_seq2seq', 'wavenet_tcn'.")
 
 
 # =============================================================================
@@ -148,7 +141,11 @@ def run_training(
     print(f"  Val   batches : {len(data_loader.val)}")
 
     model = build_nilm_model(model_name, model_config).to(device)
-    print(f"  Parameters    : {count_parameters(model):,}\n")
+    n_params = count_parameters(model)
+    model_size_mb = n_params * 4 / 1024**2
+    print(f"  Parameters    : {n_params:,}")
+    print(f"  Size (FP32)   : {model_size_mb:.1f} MB")
+    print(f"  Size (INT8)   : {model_size_mb / 4:.1f} MB\n")
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -243,7 +240,7 @@ def run_evaluation(
         input_window_length=model_config['input_window_length'],
         min_on=appliance_params.get('min_on'),
         min_off=appliance_params.get('min_off'),
-        max_length=appliance_params.get('max_length'),
+        min_committed_duration=appliance_params.get('min_committed_duration'),
     )
 
     _print_metrics(metrics, label=label)
@@ -289,6 +286,8 @@ def run_pruning(
     -------
     (pruned_model, metrics, checkpoint_path)
     """
+    from .pruner import apply_torch_pruning, get_model_stats  # lazy — pruner is optional
+
     pct        = int(pruning_ratio * 100)
     models_dir = output_dir / 'models'
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -297,9 +296,9 @@ def run_pruning(
     dummy_input = torch.randn(1, window).to(device)
 
     # Protect the output Linear from being pruned.
-    # CNN/GRU: last Linear has out_features=1 (Seq2Point).
-    # TCN: no Linear layers, so window_size value is irrelevant.
-    args = SimpleNamespace(window_size=1 if model_name in ('cnn', 'gru') else window)
+    # CNN (Seq2Point): last Linear has out_features=1.
+    # CNN Seq2Seq / TCN: last Linear has out_features=window (or no Linear for TCN).
+    args = SimpleNamespace(window_size=1 if model_name == 'cnn' else window)
 
     print(f"\n{'='*60}")
     print(f"  Pruning [{label}]  |  target param reduction: {pct}%")
@@ -325,106 +324,12 @@ def run_pruning(
         input_window_length=window,
         min_on=appliance_params.get('min_on'),
         min_off=appliance_params.get('min_off'),
-        max_length=appliance_params.get('max_length'),
+        min_committed_duration=appliance_params.get('min_committed_duration'),
     )
     _print_metrics(metrics, label=f'Pruned {pct}%')
     _save_predictions_csv(output_dir, f'pruned_{pct}pct', gt, pred, gt_status, pred_status)
 
     ckpt_path = models_dir / f'{label}_pruned_{pct}pct.pt'
-    torch.save(model.state_dict(), ckpt_path)
-    print(f"  Pruned checkpoint saved: {ckpt_path.name}")
-
-    return model, metrics, ckpt_path
-
-
-# =============================================================================
-# 5b. Unstructured Pruning
-# =============================================================================
-
-def run_unstructured_pruning(
-    model: nn.Module,
-    data_loader: SimpleNILMDataLoader,
-    model_name: str,
-    model_config: dict,
-    appliance_params: dict,
-    sparsity: float,
-    output_dir: Path,
-    label: str,
-    device: torch.device,
-) -> tuple:
-    """Apply global L1 unstructured pruning and evaluate on the test split.
-
-    Unlike structured pruning, unstructured pruning:
-    - Works with **all** model types including GRU.
-    - Does **not** change the model architecture or tensor shapes.
-    - Zeros the weights with the smallest absolute values globally across all
-      Conv1d, Linear, and GRU weight tensors.
-    - Attaches forward-pre-hooks so the zeroed weights remain zero during
-      subsequent fine-tuning (call :func:`remove_pruning_masks` to make
-      permanent before saving).
-
-    Parameters
-    ----------
-    model           : fresh model loaded from baseline checkpoint
-    data_loader     : loader with ``.train`` and ``.test`` splits
-    model_name      : ``'cnn'``, ``'gru'``, or ``'tcn'``
-    model_config    : dict from :func:`~src_pytorch.config.get_model_config`
-    appliance_params: dict from :func:`~src_pytorch.config.get_appliance_params`
-    sparsity        : fraction of weights to zero, e.g. ``0.75`` zeros 75 %
-    output_dir      : root output directory; pruned checkpoint saved under
-                      ``<output_dir>/models/``
-    label           : experiment label used in filename and printed output
-    device          : PyTorch device
-
-    Returns
-    -------
-    (pruned_model, metrics, checkpoint_path)
-        pruned_model    — model with pruning hooks still active (ready for
-                          fine-tuning; call remove_pruning_masks before saving)
-        metrics         — evaluation metrics dict
-        checkpoint_path — ``.pt`` file with masks removed and weights baked in
-    """
-    pct        = int(sparsity * 100)
-    models_dir = output_dir / 'models'
-    models_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"\n{'='*60}")
-    print(f"  Unstructured Pruning [{label}]  |  target sparsity: {pct}%")
-    print(f"{'='*60}")
-
-    model = apply_unstructured_pruning(model, amount=sparsity)
-
-    # Model shape is unchanged — report sparsity instead of MACs delta
-    params, macs, mb = get_model_stats(
-        model,
-        torch.randn(1, model_config['input_window_length']).to(device),
-    )
-    actual_sparsity = get_model_sparsity(model)
-    print(
-        f"\n  Post-prune stats — Params: {params:,}  MACs: {macs:,}  "
-        f"Size: {mb:.3f} MB  Sparsity: {actual_sparsity * 100:.1f}%"
-    )
-
-    metrics, gt, pred, gt_status, pred_status = evaluate_model(
-        model=model,
-        data_loader=data_loader,
-        model_name=model_name,
-        cutoff=appliance_params['cutoff'],
-        threshold=appliance_params['threshold'],
-        device=device,
-        input_window_length=model_config['input_window_length'],
-        min_on=appliance_params.get('min_on'),
-        min_off=appliance_params.get('min_off'),
-        max_length=appliance_params.get('max_length'),
-    )
-    _print_metrics(metrics, label=f'Unstructured Pruned {pct}%')
-    _save_predictions_csv(
-        output_dir, f'unstructured_pruned_{pct}pct', gt, pred, gt_status, pred_status
-    )
-
-    # Save a clean checkpoint (masks removed, zeros baked in)
-    remove_pruning_masks(model)
-    ckpt_path = models_dir / f'{label}_unstructured_pruned_{pct}pct.pt'
     torch.save(model.state_dict(), ckpt_path)
     print(f"  Pruned checkpoint saved: {ckpt_path.name}")
 
@@ -496,11 +401,11 @@ def run_finetuning(
             outputs = model(batch_x)
 
             # Align target shape to model output
-            # CNN/GRU : output (B, 1),          target (B,)         → (B, 1)
-            # TCN     : output (B, seq_len, 1), target (B, seq_len) → (B, seq_len, 1)
-            if model_name in ('cnn', 'gru') and batch_y.dim() == 1:
+            # CNN (Seq2Point) : output (B, 1),          target (B,)         → (B, 1)
+            # CNN Seq2Seq/TCN : output (B, seq_len, 1), target (B, seq_len) → (B, seq_len, 1)
+            if model_name == 'cnn' and batch_y.dim() == 1:
                 batch_y = batch_y.unsqueeze(1)
-            elif model_name == 'tcn' and batch_y.dim() == 2:
+            elif model_name in ('cnn_seq2seq', 'wavenet_tcn') and batch_y.dim() == 2:
                 batch_y = batch_y.unsqueeze(-1)
 
             loss = loss_fn(outputs, batch_y)
@@ -523,7 +428,7 @@ def run_finetuning(
         input_window_length=model_config['input_window_length'],
         min_on=appliance_params.get('min_on'),
         min_off=appliance_params.get('min_off'),
-        max_length=appliance_params.get('max_length'),
+        min_committed_duration=appliance_params.get('min_committed_duration'),
     )
     _print_metrics(metrics, label=f'Fine-tuned {epochs}ep')
     _save_predictions_csv(
@@ -582,7 +487,7 @@ def run_quantization(
     -------
     dict | None — metrics dict (mae, f1, …) or ``None`` if skipped
     """
-    if model_name != 'tcn':
+    if model_name != 'wavenet_tcn':
         print(
             f"\n  [Quantization] {model_name.upper()} quantization is not yet "
             "supported — to be implemented in a later version."
@@ -684,7 +589,7 @@ def run_quantization(
         threshold=appliance_params['threshold'],
         min_on=appliance_params.get('min_on'),
         min_off=appliance_params.get('min_off'),
-        max_length=appliance_params.get('max_length'),
+        min_committed_duration=appliance_params.get('min_committed_duration'),
     )
     _print_metrics(metrics, label='TFLite INT8')
     pct = int(pruning_ratio * 100)
@@ -717,26 +622,25 @@ def save_pipeline_results(
     csv_path = output_dir / f'{appliance}_{model_name}_pipeline_results.csv'
 
     fieldnames = [
-        'Stage', 'Params', 'MACs', 'MB',
-        'MAE', 'F1', 'F1_Complex', 'Precision', 'Recall', 'Accuracy', 'Energy_Error_%',
+        'Stage', 'F1_Complex', 'Precision_Complex', 'Recall_Complex',
+        'MAE', 'Accuracy', 'GT_Energy_Wh', 'Pred_Energy_Wh',
     ]
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            f1c = row.get('f1_complex')
+            f1c   = row.get('f1_complex')
+            prec  = row.get('precision_complex')
+            rec   = row.get('recall_complex')
             writer.writerow({
-                'Stage'          : row['label'],
-                'Params'         : row.get('params', ''),
-                'MACs'           : row.get('macs',   ''),
-                'MB'             : row.get('mb',     ''),
-                'MAE'            : round(row['mae'],                  4),
-                'F1'             : round(row['f1'],                   4),
-                'F1_Complex'     : round(f1c, 4) if f1c is not None else '',
-                'Precision'      : round(row['precision'],            4),
-                'Recall'         : round(row['recall'],               4),
-                'Accuracy'       : round(row['accuracy'],             4),
-                'Energy_Error_%' : round(row['energy_error_percent'], 2),
+                'Stage'             : row['label'],
+                'F1_Complex'        : round(f1c,  4) if f1c  is not None else '',
+                'Precision_Complex' : round(prec, 4) if prec is not None else '',
+                'Recall_Complex'    : round(rec,  4) if rec  is not None else '',
+                'MAE'               : round(row['mae'],                   4),
+                'Accuracy'          : round(row['accuracy'],              4),
+                'GT_Energy_Wh'      : round(row['total_gt_energy_wh'],   2),
+                'Pred_Energy_Wh'    : round(row['total_pred_energy_wh'], 2),
             })
 
     print(f"\n  Pipeline results saved to: {csv_path}")
@@ -819,21 +723,21 @@ def _save_metrics_csv(
     slug = label.lower().replace(' ', '_').replace('%', 'pct').replace('+', '').replace('__', '_')
     csv_path = metrics_dir / f'{appliance}_{slug}_results.csv'
 
-    f1c = metrics.get('f1_complex')
+    f1c  = metrics.get('f1_complex')
+    prec = metrics.get('precision_complex')
+    rec  = metrics.get('recall_complex')
     row = {
         'Stage'               : label,
         'Model'               : model_name,
         'Appliance'           : appliance,
         'Dataset'             : dataset,
         'MAE'                 : round(metrics['mae'],                  4),
-        'F1'                  : round(metrics['f1'],                   4),
-        'F1_Complex'          : round(f1c, 4) if f1c is not None else '',
+        'F1_Complex'          : round(f1c,  4) if f1c  is not None else '',
+        'Precision_Complex'   : round(prec, 4) if prec is not None else '',
+        'Recall_Complex'      : round(rec,  4) if rec  is not None else '',
         'Accuracy'            : round(metrics['accuracy'],             4),
-        'Precision'           : round(metrics['precision'],            4),
-        'Recall'              : round(metrics['recall'],               4),
-        'GT_Energy_Wh'        : round(metrics['total_gt_energy_wh'],   2),
-        'Pred_Energy_Wh'      : round(metrics['total_pred_energy_wh'], 2),
-        'Energy_Error_Percent': round(metrics['energy_error_percent'],  2),
+        'GT_Energy_Wh'  : round(metrics['total_gt_energy_wh'],   2),
+        'Pred_Energy_Wh': round(metrics['total_pred_energy_wh'], 2),
     }
     pd.DataFrame([row]).to_csv(csv_path, index=False)
     print(f"  Stage metrics saved: {csv_path.name}")
@@ -854,11 +758,11 @@ def _print_metrics(
         print(f"  {header}")
     print(f"  {'─'*40}")
     print(f"  MAE            : {metrics['mae']:.4f} W")
-    print(f"  F1             : {metrics['f1']:.4f}")
     if 'f1_complex' in metrics:
         print(f"  F1 Complex     : {metrics['f1_complex']:.4f}")
+        print(f"  Precision Cmplx: {metrics['precision_complex']:.4f}")
+        print(f"  Recall Complex : {metrics['recall_complex']:.4f}")
     print(f"  Accuracy       : {metrics['accuracy']:.4f}")
-    print(f"  Precision      : {metrics['precision']:.4f}")
-    print(f"  Recall         : {metrics['recall']:.4f}")
-    print(f"  Energy Error % : {metrics['energy_error_percent']:.2f}")
+    print(f"  GT Energy (Wh) : {metrics['total_gt_energy_wh']:.2f}")
+    print(f"  Pred Energy(Wh): {metrics['total_pred_energy_wh']:.2f}")
     print(f"  {'─'*40}\n")

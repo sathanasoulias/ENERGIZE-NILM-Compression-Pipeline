@@ -1,10 +1,11 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 PyTorch Models for NILM
 """
 
 from .cnn import CNN_NILM, get_model as get_cnn_model
-from .gru import GRU_NILM, get_model as get_gru_model
 from .tcn import TCN_NILM, get_model as get_tcn_model
+from .cnn_seq2seq import CNN_NILM_Seq2Seq, get_model as get_cnn_seq2seq_model
 
 
 def get_model(model_name: str, **kwargs):
@@ -12,7 +13,7 @@ def get_model(model_name: str, **kwargs):
     Factory function to get a model by name.
 
     Args:
-        model_name: Name of the model ('cnn', 'gru', 'tcn')
+        model_name: Name of the model ('cnn', 'cnn_seq2seq', 'tcn')
         **kwargs: Model-specific arguments
 
     Returns:
@@ -20,8 +21,8 @@ def get_model(model_name: str, **kwargs):
     """
     models = {
         'cnn': get_cnn_model,
-        'gru': get_gru_model,
-        'tcn': get_tcn_model
+        'wavenet_tcn': get_tcn_model,
+        'cnn_seq2seq': get_cnn_seq2seq_model,
     }
 
     if model_name.lower() not in models:
@@ -31,6 +32,6 @@ def get_model(model_name: str, **kwargs):
 
 
 __all__ = [
-    'CNN_NILM', 'GRU_NILM', 'TCN_NILM',
-    'get_model', 'get_cnn_model', 'get_gru_model', 'get_tcn_model'
+    'CNN_NILM', 'TCN_NILM', 'CNN_NILM_Seq2Seq',
+    'get_model', 'get_cnn_model', 'get_tcn_model', 'get_cnn_seq2seq_model'
 ]

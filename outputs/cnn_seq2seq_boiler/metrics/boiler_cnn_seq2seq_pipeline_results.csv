@@ -1,0 +1,4 @@
+Stage,F1_Complex,Precision_Complex,Recall_Complex,MAE,Accuracy,GT_Energy_Wh,Pred_Energy_Wh
+CNN_SEQ2SEQ Baseline,0.9562,0.9298,0.9843,7.9734,0.9984,22142.48,20930.14
+CNN_SEQ2SEQ Pruned 50%,0.0,0.0,0.0,48.9981,0.9829,22142.48,0.0
+CNN_SEQ2SEQ Pruned 50% + Fine-tuned 1ep,0.9325,0.8852,0.9851,8.0886,0.9975,22142.48,22043.17

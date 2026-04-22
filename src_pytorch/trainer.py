@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 PyTorch Trainer for NILM models with callbacks support.
 """
@@ -224,6 +225,7 @@ class Trainer:
         self.early_stopping = None
         self.model_checkpoint = None
         self.tensorboard_writer = None
+        self.lr_scheduler = None
 
         # Training state
         self.history = TrainingHistory()
@@ -234,7 +236,11 @@ class Trainer:
         checkpoint_dir: str = './checkpoint',
         tensorboard_dir: str = './tensorboard',
         early_stopping_patience: int = 6,
-        early_stopping_min_delta: float = 1e-6
+        early_stopping_min_delta: float = 1e-6,
+        lr_scheduler_factor: float = 0.5,
+        lr_scheduler_patience: int = 5,
+        lr_scheduler_min_lr: float = 1e-6,
+        lr_scheduler_cooldown: int = 2,
     ):
         """
         Setup training callbacks.
@@ -244,6 +250,10 @@ class Trainer:
             tensorboard_dir: Directory for TensorBoard logs
             early_stopping_patience: Patience for early stopping
             early_stopping_min_delta: Min delta for early stopping
+            lr_scheduler_factor: Factor by which LR is reduced on plateau
+            lr_scheduler_patience: Epochs without val_loss improvement before LR reduction
+            lr_scheduler_min_lr: Lower bound on the learning rate
+            lr_scheduler_cooldown: Epochs to wait after a reduction before normal operation resumes
         """
         # Early stopping
         self.early_stopping = EarlyStopping(
@@ -262,6 +272,16 @@ class Trainer:
         # TensorBoard
         self.tensorboard_writer = SummaryWriter(log_dir=tensorboard_dir)
 
+        # ReduceLROnPlateau scheduler
+        self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=lr_scheduler_factor,
+            patience=lr_scheduler_patience,
+            min_lr=lr_scheduler_min_lr,
+            cooldown=lr_scheduler_cooldown,
+        )
+
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """
         Train for one epoch.
@@ -277,6 +297,7 @@ class Trainer:
         total_mae = 0.0
         num_batches = 0
 
+        current_lr = self.optimizer.param_groups[0]['lr']
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch + 1}")
 
         for batch_x, batch_y in pbar:
@@ -298,6 +319,7 @@ class Trainer:
 
             # Backward pass
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
             self.optimizer.step()
 
             # Metrics
@@ -305,7 +327,7 @@ class Trainer:
             total_mae += torch.mean(torch.abs(outputs - batch_y)).item()
             num_batches += 1
 
-            pbar.set_postfix({'loss': loss.item()})
+            pbar.set_postfix({'loss': loss.item(), 'lr': f'{current_lr:.2e}'})
 
         return {
             'loss': total_loss / num_batches,
@@ -392,12 +414,23 @@ class Trainer:
                 val_mae=val_metrics['mae']
             )
 
+            # LR scheduler step (must happen before logging so the new LR is recorded)
+            if self.lr_scheduler:
+                prev_lr = self.optimizer.param_groups[0]['lr']
+                self.lr_scheduler.step(val_metrics['loss'])
+                current_lr = self.optimizer.param_groups[0]['lr']
+                if current_lr < prev_lr and verbose:
+                    print(f"ReduceLROnPlateau: LR reduced from {prev_lr:.2e} to {current_lr:.2e}")
+            else:
+                current_lr = self.optimizer.param_groups[0]['lr']
+
             # TensorBoard logging
             if self.tensorboard_writer:
                 self.tensorboard_writer.add_scalar('Loss/train', train_metrics['loss'], epoch)
                 self.tensorboard_writer.add_scalar('Loss/val', val_metrics['loss'], epoch)
                 self.tensorboard_writer.add_scalar('MAE/train', train_metrics['mae'], epoch)
                 self.tensorboard_writer.add_scalar('MAE/val', val_metrics['mae'], epoch)
+                self.tensorboard_writer.add_scalar('LR', current_lr, epoch)
 
             # Track best
             if val_metrics['loss'] < best_val_loss:
@@ -410,7 +443,8 @@ class Trainer:
                       f"loss: {train_metrics['loss']:.4f} - "
                       f"val_loss: {val_metrics['loss']:.4f} - "
                       f"mae: {train_metrics['mae']:.4f} - "
-                      f"val_mae: {val_metrics['mae']:.4f}")
+                      f"val_mae: {val_metrics['mae']:.4f} - "
+                      f"lr: {current_lr:.2e}")
 
             # Model checkpoint
             if self.model_checkpoint:

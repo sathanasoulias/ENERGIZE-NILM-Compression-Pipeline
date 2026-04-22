@@ -1,14 +1,15 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 PyTorch implementation of OpenNILM
 
 This package provides PyTorch implementations of NILM (Non-Intrusive Load Monitoring)
-models including CNN, GRU, and TCN architectures.
+models including CNN and TCN architectures.
 """
 
-from .models import CNN_NILM, GRU_NILM, TCN_NILM, get_model
+from .models import CNN_NILM, TCN_NILM, CNN_NILM_Seq2Seq, get_model
 from .data_loader import NILMDataset, DataLoaderNILM, SimpleNILMDataLoader
 from .trainer import Trainer, train_model, EarlyStopping, ModelCheckpoint, TrainingHistory
-from .tester import Tester, SimpleTester, load_model
+from .tester import SimpleTester, load_model
 from .config import (
     MODEL_CONFIGS,
     TRAINING,
@@ -31,32 +32,30 @@ from .utils import (
     save_checkpoint,
     load_checkpoint
 )
-from .pruner import (
-    count_ops_and_params,
-    count_parameters_per_layer,
-    get_model_stats,
-    param_ratio_to_channel_ratio,
-    apply_torch_pruning,
-    get_prunable_parameters,
-    apply_unstructured_pruning,
-    remove_pruning_masks,
-    get_model_sparsity,
-)
+
+
 from .evaluator import (
     run_predictions,
     compute_status,
     compute_metrics,
     evaluate_model,
 )
+from .pruner import (
+    count_ops_and_params,
+    count_parameters_per_layer,
+    get_model_stats,
+    get_model_sparsity,
+    apply_torch_pruning,
+    apply_unstructured_pruning,
+    remove_pruning_masks,
+    get_prunable_parameters,
+    param_ratio_to_channel_ratio,
+)
 from .pipeline import (
     build_nilm_model,
     get_data_loader,
     run_training,
     run_evaluation,
-    run_pruning,
-    run_unstructured_pruning,
-    run_finetuning,
-    run_quantization,
     save_pipeline_results,
 )
 
@@ -68,8 +67,8 @@ __version__ = '1.0.0'
 __all__ = [
     # Models
     'CNN_NILM',
-    'GRU_NILM',
     'TCN_NILM',
+    'CNN_NILM_Seq2Seq',
     'get_model',
 
     # Data
@@ -85,7 +84,6 @@ __all__ = [
     'TrainingHistory',
 
     # Testing
-    'Tester',
     'SimpleTester',
     'load_model',
 
@@ -111,31 +109,28 @@ __all__ = [
     'save_checkpoint',
     'load_checkpoint',
 
-    # Pruning
-    'count_ops_and_params',
-    'count_parameters_per_layer',
-    'get_model_stats',
-    'param_ratio_to_channel_ratio',
-    'apply_torch_pruning',
-    'get_prunable_parameters',
-    'apply_unstructured_pruning',
-    'remove_pruning_masks',
-    'get_model_sparsity',
-
     # Evaluation
     'run_predictions',
     'compute_status',
     'compute_metrics',
     'evaluate_model',
 
+    # Pruner
+    'count_ops_and_params',
+    'count_parameters_per_layer',
+    'get_model_stats',
+    'get_model_sparsity',
+    'apply_torch_pruning',
+    'apply_unstructured_pruning',
+    'remove_pruning_masks',
+    'get_prunable_parameters',
+    'param_ratio_to_channel_ratio',
+
     # Pipeline
     'build_nilm_model',
     'get_data_loader',
     'run_training',
     'run_evaluation',
-    'run_pruning',
-    'run_unstructured_pruning',
-    'run_finetuning',
     'save_pipeline_results',
     # run_quantization intentionally omitted from __all__ (lazy TF import)
 ]

@@ -1,5 +1,0 @@
-Stage,MAE,F1,F1_Complex,Precision,Recall,Accuracy,Energy_Error_%
-CNN Baseline,7.307,0.9298,0.9387,0.8791,0.9868,0.9974,1.39
-CNN Pruned 75%,48.9987,0.0,0.0,0.0,0.0,0.9829,100.0
-CNN Pruned 75% + Fine-tuned 1ep,10.3736,0.8936,0.8965,0.8189,0.9834,0.996,10.26
-Pruned 75% + FT + TFLite INT8,8.5638,0.9135,0.9178,0.8483,0.9895,0.9968,8.149999618530273

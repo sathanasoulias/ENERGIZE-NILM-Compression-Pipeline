@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 Utility functions for PyTorch NILM training.
 """
@@ -165,21 +166,6 @@ def load_checkpoint(
         'loss': checkpoint.get('loss', float('inf'))
     }
 
-
-def value_checks(cfg) -> None:
-    """
-    Validate configuration values.
-
-    Args:
-        cfg: Hydra configuration object
-    """
-    if cfg.model.name == 'seq2subseq' or cfg.model.name == 'seq2seq':
-        if cfg.model.init.input_window_length % 2 != 0:
-            raise ValueError('Input width must be divisible by 2 for seq2subseq model')
-
-    if cfg.model.name == 'cnn':
-        if cfg.model.init.input_window_length % 2 != 1:
-            raise ValueError('Input width must be an odd number for seq2point (CNN) model')
 
 
 class AverageMeter:

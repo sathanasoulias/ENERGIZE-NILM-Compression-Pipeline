@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Sotirios Athanasoulias. MIT License — see LICENSE for details.
 """
 TCN (Temporal Convolutional Network) based Seq2Seq model for NILM
 Based on: https://arxiv.org/pdf/1902.08736 (WaveNet-style architecture)
@@ -51,9 +52,12 @@ class GatedBlock(nn.Module):
             in_channels, out_channels, kernel_size, dilation=dilation
         )
 
+        # BatchNorm stabilises activations — critical when filter counts are large;
+        # gets folded into Conv1d at TFLite export so has zero inference overhead
+        self.bn = nn.BatchNorm1d(out_channels)
+
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        # Apply L2 regularization through weight decay in optimizer
         self.l2_reg = l2_reg
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -63,10 +67,8 @@ class GatedBlock(nn.Module):
         # Gate path with Sigmoid
         gate = torch.sigmoid(self.gate_conv(x))
 
-        # Gated output
-        gated = signal * gate
-
-        # Dropout
+        # Gated output → normalise → dropout
+        gated = self.bn(signal * gate)
         out = self.dropout(gated)
 
         return out
@@ -149,19 +151,28 @@ class TCN_NILM(nn.Module):
         # Initial conv output + all gated block outputs
         total_skip_channels = nb_filters[0] + sum(nb_filters) * stacks
 
-        # Final layers (TimeDistributed Dense equivalent)
-        self.final_conv = nn.Conv1d(total_skip_channels, 1, kernel_size=1)
-        self.leaky_relu = nn.LeakyReLU(0.1)
+        # Two-stage projection: large skip concat → 256 → 1
+        # Splitting the compression into two steps makes learning much easier
+        proj_channels = 256
+        self.proj_conv = nn.Conv1d(total_skip_channels, proj_channels, kernel_size=1)
+        self.proj_relu = nn.ReLU()
+        self.final_conv = nn.Conv1d(proj_channels, 1, kernel_size=1)
 
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """Initialize weights using Xavier initialization."""
+        """Xavier for gated blocks; He for projection layers (followed by ReLU)."""
         for m in self.modules():
             if isinstance(m, nn.Conv1d):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+        # proj_conv has very large fan_in — He init suits its ReLU activation
+        nn.init.kaiming_uniform_(self.proj_conv.weight, nonlinearity='relu')
+        # final_conv: linear output, small He init; positive bias warms up output
+        nn.init.kaiming_uniform_(self.final_conv.weight, nonlinearity='linear')
+        if self.final_conv.bias is not None:
+            nn.init.constant_(self.final_conv.bias, 0.01)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -197,9 +208,9 @@ class TCN_NILM(nn.Module):
         # Concatenate all skip connections
         out = torch.cat(skip_connections, dim=1)
 
-        # Final projection
+        # Two-stage projection (TFLite compatible)
+        out = self.proj_relu(self.proj_conv(out))
         out = self.final_conv(out)
-        out = self.leaky_relu(out)
 
         # Return shape: (batch, seq_len, 1)
         out = out.permute(0, 2, 1)

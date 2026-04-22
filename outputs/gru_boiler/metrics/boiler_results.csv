@@ -1,2 +1,0 @@
-Model,Appliance,Dataset,MAE,F1,F1_Complex,Accuracy,Precision,Recall,GT_Energy_Wh,Pred_Energy_Wh,Energy_Error_Percent
-gru,boiler,plegma,7.9892,0.932,0.9523,0.9975,0.8809,0.9894,22142.48,23617.46,6.66

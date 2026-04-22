@@ -1,2 +1,0 @@
-Model,Appliance,Dataset,MAE,F1,F1_Complex,Accuracy,Precision,Recall,GT_Energy_Wh,Pred_Energy_Wh,Energy_Error_Percent
-gru,washing_machine,plegma,3.368,0.5819,0.8542,0.9871,0.4684,0.7681,1839.96,1654.76,10.07
